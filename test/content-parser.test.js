@@ -866,3 +866,73 @@ test('a synchronous throw in a custom parser is handled like a route error, not 
     t.assert.strictEqual(res.statusCode, 413)
   })
 })
+
+test('parameterized parser registration preserves parameter value case', async t => {
+  const fastify = Fastify()
+  t.after(() => fastify.close())
+  fastify.addContentTypeParser('Application/X-Profile; Profile=MyProfile', first)
+
+  t.assert.strictEqual(fastify.hasContentTypeParser('application/x-profile; profile="MyProfile"'), true)
+  t.assert.strictEqual(fastify.hasContentTypeParser('application/x-profile; profile=myprofile'), false)
+  fastify.removeContentTypeParser('APPLICATION/X-PROFILE; PROFILE=MyProfile')
+  t.assert.strictEqual(fastify.hasContentTypeParser('application/x-profile; profile=MyProfile'), false)
+})
+
+test('parameterized parser dispatch preserves parameter value case', async t => {
+  const fastify = Fastify()
+  t.after(() => fastify.close())
+  fastify.addContentTypeParser('application/x-profile', { parseAs: 'string' }, (request, body, done) => done(null, 'generic'))
+  fastify.addContentTypeParser('Application/X-Profile; Profile=MyProfile', { parseAs: 'string' }, (request, body, done) => done(null, 'profile'))
+  fastify.post('/', request => request.body)
+
+  for (const [contentType, expected] of [
+    ['APPLICATION/X-PROFILE; PROFILE="MyProfile"', 'profile'],
+    ['application/x-profile; profile=myprofile', 'generic'],
+    ['application/x-profile', 'generic']
+  ]) {
+    await t.test(contentType, async t => {
+      const response = await fastify.inject({
+        method: 'POST', url: '/', headers: { 'content-type': contentType }, payload: 'body'
+      })
+      t.assert.strictEqual(response.statusCode, 200)
+      t.assert.strictEqual(response.body, expected)
+    })
+  }
+})
+
+test('parsers with case-distinct parameter values can be registered separately', async t => {
+  const fastify = Fastify()
+  t.after(() => fastify.close())
+  fastify.addContentTypeParser('application/x-profile; profile=MyProfile', first)
+  fastify.addContentTypeParser('application/x-profile; profile=myprofile', second)
+
+  t.assert.strictEqual(fastify[keys.kContentTypeParser].getParser('application/x-profile; profile=MyProfile').fn, first)
+  t.assert.strictEqual(fastify[keys.kContentTypeParser].getParser('application/x-profile; profile=myprofile').fn, second)
+  t.assert.throws(() => fastify.addContentTypeParser('APPLICATION/X-PROFILE; PROFILE="MyProfile"', third), FST_ERR_CTP_ALREADY_PRESENT)
+})
+
+test('default parser overrides still accept mixed-case media types', async t => {
+  const fastify = Fastify()
+  t.after(() => fastify.close())
+  fastify.addContentTypeParser(' Application/JSON ', first)
+  fastify.addContentTypeParser(' Text/Plain ', second)
+
+  t.assert.strictEqual(fastify[keys.kContentTypeParser].getParser('application/json').fn, first)
+  t.assert.strictEqual(fastify[keys.kContentTypeParser].getParser('text/plain').fn, second)
+  t.assert.throws(() => fastify.addContentTypeParser('APPLICATION/JSON', third), FST_ERR_CTP_ALREADY_PRESENT)
+  t.assert.throws(() => fastify.addContentTypeParser('TEXT/PLAIN', third), FST_ERR_CTP_ALREADY_PRESENT)
+})
+
+test('parameterized parser registration keeps charset normalization', async t => {
+  const fastify = Fastify()
+  t.after(() => fastify.close())
+  fastify.addContentTypeParser('Text/Plain; Charset=UTF-8', { parseAs: 'string' }, (request, body, done) => done(null, 'custom'))
+  t.assert.throws(() => fastify.addContentTypeParser('text/plain; charset=utf-8', first), FST_ERR_CTP_ALREADY_PRESENT)
+  fastify.post('/', request => request.body)
+
+  const response = await fastify.inject({
+    method: 'POST', url: '/', headers: { 'content-type': 'text/plain; charset=utf-8' }, payload: 'body'
+  })
+  t.assert.strictEqual(response.statusCode, 200)
+  t.assert.strictEqual(response.body, 'custom')
+})
